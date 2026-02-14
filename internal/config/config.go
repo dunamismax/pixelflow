@@ -10,16 +10,22 @@ import (
 )
 
 type Config struct {
-	API      APIConfig
-	Queue    QueueConfig
-	Worker   WorkerConfig
-	Storage  StorageConfig
-	Database DatabaseConfig
-	Webhook  WebhookConfig
+	API       APIConfig
+	Queue     QueueConfig
+	Worker    WorkerConfig
+	Storage   StorageConfig
+	Database  DatabaseConfig
+	Webhook   WebhookConfig
+	Telemetry TelemetryConfig
 }
 
 type APIConfig struct {
-	Addr string
+	Addr              string
+	MetricsAddr       string
+	RateLimitEnabled  bool
+	RateLimitCapacity int
+	RateLimitWindow   time.Duration
+	RateLimitUserID   string
 }
 
 type QueueConfig struct {
@@ -41,6 +47,7 @@ type WorkerConfig struct {
 	Concurrency    int
 	MaxActiveJobs  int
 	LocalOutputDir string
+	MetricsAddr    string
 }
 
 type StorageConfig struct {
@@ -64,12 +71,23 @@ type WebhookConfig struct {
 	MaxBackoff     time.Duration
 }
 
+type TelemetryConfig struct {
+	TracesExporter    string
+	OTLPTraceEndpoint string
+	OTLPInsecure      bool
+}
+
 func Load() Config {
 	defaultWorkerSlots := max(1, runtime.NumCPU()/2)
 
 	return Config{
 		API: APIConfig{
-			Addr: env("PIXELFLOW_API_ADDR", ":8080"),
+			Addr:              env("PIXELFLOW_API_ADDR", ":8080"),
+			MetricsAddr:       env("PIXELFLOW_API_METRICS_ADDR", ":9090"),
+			RateLimitEnabled:  envBool("PIXELFLOW_API_RATE_LIMIT_ENABLED", true),
+			RateLimitCapacity: envInt("PIXELFLOW_API_RATE_LIMIT_CAPACITY", 60),
+			RateLimitWindow:   envDuration("PIXELFLOW_API_RATE_LIMIT_WINDOW", time.Minute),
+			RateLimitUserID:   env("PIXELFLOW_API_RATE_LIMIT_USER_ID_HEADER", "X-User-ID"),
 		},
 		Queue: QueueConfig{
 			RedisAddr:     env("REDIS_ADDR", "localhost:6379"),
@@ -81,6 +99,7 @@ func Load() Config {
 			Concurrency:    envInt("WORKER_CONCURRENCY", max(2, runtime.NumCPU())),
 			MaxActiveJobs:  envInt("WORKER_MAX_ACTIVE_JOBS", defaultWorkerSlots),
 			LocalOutputDir: env("WORKER_LOCAL_OUTPUT_DIR", "./.pixelflow-output"),
+			MetricsAddr:    env("WORKER_METRICS_ADDR", ":9091"),
 		},
 		Storage: StorageConfig{
 			Endpoint:         env("MINIO_ENDPOINT", "localhost:9000"),
@@ -99,6 +118,11 @@ func Load() Config {
 			MaxAttempts:    envInt("WEBHOOK_MAX_ATTEMPTS", 5),
 			InitialBackoff: envDuration("WEBHOOK_INITIAL_BACKOFF", 1*time.Second),
 			MaxBackoff:     envDuration("WEBHOOK_MAX_BACKOFF", 30*time.Second),
+		},
+		Telemetry: TelemetryConfig{
+			TracesExporter:    env("OTEL_TRACES_EXPORTER", "none"),
+			OTLPTraceEndpoint: env("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+			OTLPInsecure:      envBool("OTEL_EXPORTER_OTLP_INSECURE", true),
 		},
 	}
 }

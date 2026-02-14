@@ -42,6 +42,7 @@ type Watermark struct {
 
 type Job struct {
 	ID         string
+	UserID     string
 	Status     string
 	SourceType string
 	WebhookURL string

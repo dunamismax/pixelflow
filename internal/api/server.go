@@ -17,15 +17,22 @@ import (
 	"github.com/dunamismax/pixelflow/internal/queue"
 	"github.com/dunamismax/pixelflow/internal/store"
 	"github.com/hibiken/asynq"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Server struct {
-	logger      *log.Logger
-	queueClient queueEnqueuer
-	jobStore    store.JobStore
-	storage     objectStorage
-	presignTTL  time.Duration
-	mux         *http.ServeMux
+	logger                *log.Logger
+	queueClient           queueEnqueuer
+	jobStore              store.JobStore
+	storage               objectStorage
+	presignTTL            time.Duration
+	mux                   *http.ServeMux
+	handler               http.Handler
+	metrics               *metrics
+	rateLimiter           RateLimiter
+	rateLimitUserIDHeader string
+	tracer                trace.Tracer
 }
 
 type queueEnqueuer interface {
@@ -37,7 +44,18 @@ type objectStorage interface {
 	ObjectExists(ctx context.Context, objectKey string) (bool, error)
 }
 
-func NewServer(logger *log.Logger, queueClient queueEnqueuer, jobStore store.JobStore, storage objectStorage, presignTTL time.Duration) *Server {
+type Option func(*Server)
+
+func WithRateLimiter(limiter RateLimiter, userIDHeader string) Option {
+	return func(s *Server) {
+		s.rateLimiter = limiter
+		if strings.TrimSpace(userIDHeader) != "" {
+			s.rateLimitUserIDHeader = userIDHeader
+		}
+	}
+}
+
+func NewServer(logger *log.Logger, queueClient queueEnqueuer, jobStore store.JobStore, storage objectStorage, presignTTL time.Duration, opts ...Option) *Server {
 	if presignTTL <= 0 {
 		presignTTL = 15 * time.Minute
 	}
@@ -46,14 +64,21 @@ func NewServer(logger *log.Logger, queueClient queueEnqueuer, jobStore store.Job
 	}
 
 	s := &Server{
-		logger:      logger,
-		queueClient: queueClient,
-		jobStore:    jobStore,
-		storage:     storage,
-		presignTTL:  presignTTL,
-		mux:         http.NewServeMux(),
+		logger:                logger,
+		queueClient:           queueClient,
+		jobStore:              jobStore,
+		storage:               storage,
+		presignTTL:            presignTTL,
+		mux:                   http.NewServeMux(),
+		metrics:               newMetrics(),
+		tracer:                otel.Tracer("pixelflow/api"),
+		rateLimitUserIDHeader: "X-User-ID",
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	s.routes()
+	s.handler = s.metrics.withHTTPMetrics(s.withTracing(s.withRateLimit(s.mux)))
 	return s
 }
 
@@ -68,7 +93,11 @@ func (unavailableObjectStorage) ObjectExists(_ context.Context, _ string) (bool,
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return s.handler
+}
+
+func (s *Server) MetricsHandler() http.Handler {
+	return s.metrics.metricsHandler()
 }
 
 func (s *Server) routes() {
@@ -94,6 +123,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC()
 	jobID := id.New()
+	userIDHeader := s.rateLimitUserIDHeader
+	if strings.TrimSpace(userIDHeader) == "" {
+		userIDHeader = "X-User-ID"
+	}
+	userID := strings.TrimSpace(r.Header.Get(userIDHeader))
+	if userID == "" {
+		userID = "anonymous"
+	}
 	sourceType := strings.ToLower(strings.TrimSpace(req.SourceType))
 	objectKey := strings.TrimSpace(req.ObjectKey)
 	uploadState := "not_required"
@@ -113,6 +150,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	job := domain.Job{
 		ID:         jobID,
+		UserID:     userID,
 		Status:     domain.JobStatusCreated,
 		SourceType: sourceType,
 		WebhookURL: req.WebhookURL,
@@ -178,6 +216,7 @@ func (s *Server) handleStartJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to enqueue job"})
 		return
 	}
+	s.metrics.queueEnqueued.WithLabelValues(taskInfo.Queue).Inc()
 
 	if _, err := s.jobStore.UpdateStatus(r.Context(), job.ID, domain.JobStatusQueued); err != nil {
 		s.logger.Printf("update status failed for job %s: %v", job.ID, err)

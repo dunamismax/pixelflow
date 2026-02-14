@@ -37,7 +37,8 @@ type Output struct {
 }
 
 type Result struct {
-	Outputs []Output
+	SourceBytes int
+	Outputs     []Output
 }
 
 type Fetcher interface {
@@ -92,7 +93,10 @@ func (p *Processor) Process(ctx context.Context, req Request) (Result, error) {
 		return Result{}, fmt.Errorf("fetch stage: %w", err)
 	}
 
-	out := Result{Outputs: make([]Output, 0, len(req.Pipeline))}
+	out := Result{
+		SourceBytes: len(sourceBytes),
+		Outputs:     make([]Output, 0, len(req.Pipeline)),
+	}
 	for _, step := range req.Pipeline {
 		select {
 		case <-ctx.Done():

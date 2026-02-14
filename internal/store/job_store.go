@@ -11,3 +11,7 @@ type JobStore interface {
 	Get(ctx context.Context, id string) (domain.Job, bool, error)
 	UpdateStatus(ctx context.Context, id, status string) (domain.Job, error)
 }
+
+type UsageStore interface {
+	CreateUsageLog(ctx context.Context, usage domain.UsageLog) error
+}

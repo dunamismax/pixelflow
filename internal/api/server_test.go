@@ -13,6 +13,7 @@ import (
 
 	"github.com/dunamismax/pixelflow/internal/domain"
 	"github.com/dunamismax/pixelflow/internal/queue"
+	"github.com/dunamismax/pixelflow/internal/ratelimit"
 	"github.com/dunamismax/pixelflow/internal/store"
 	"github.com/hibiken/asynq"
 )
@@ -113,6 +114,83 @@ func TestStartJobRejectsMissingSourceObject(t *testing.T) {
 	}
 }
 
+func TestCreateJobPersistsAnonymousUserIDByDefault(t *testing.T) {
+	jobStore := store.NewMemoryJobStore()
+	server := NewServer(
+		testLogger(t),
+		&fakeQueueClient{},
+		jobStore,
+		&fakeStorage{presignedURL: "http://minio.local/presigned-put"},
+		15*time.Minute,
+	)
+
+	reqBody := `{
+		"source_type":"s3_presigned",
+		"pipeline":[{"id":"thumb","action":"resize","width":120}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d", http.StatusAccepted, rec.Code)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	jobID, ok := body["job_id"].(string)
+	if !ok || jobID == "" {
+		t.Fatalf("expected job_id string, got %v", body["job_id"])
+	}
+
+	job, found, err := jobStore.Get(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("fetch job: %v", err)
+	}
+	if !found {
+		t.Fatal("expected job to be persisted")
+	}
+	if job.UserID != "anonymous" {
+		t.Fatalf("expected user_id=anonymous, got %s", job.UserID)
+	}
+}
+
+func TestRateLimitMiddlewareRejectsWhenBucketDenied(t *testing.T) {
+	jobStore := store.NewMemoryJobStore()
+	server := NewServer(
+		testLogger(t),
+		&fakeQueueClient{},
+		jobStore,
+		&fakeStorage{presignedURL: "http://minio.local/presigned-put"},
+		15*time.Minute,
+		WithRateLimiter(&fakeRateLimiter{
+			decision: ratelimit.Decision{Allowed: false, Remaining: 0, RetryAfter: 2 * time.Second},
+		}, "X-User-ID"),
+	)
+
+	reqBody := `{
+		"source_type":"s3_presigned",
+		"pipeline":[{"id":"thumb","action":"resize","width":120}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-ID", "alice")
+
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status %d, got %d", http.StatusTooManyRequests, rec.Code)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "2" {
+		t.Fatalf("expected retry-after=2, got %s", got)
+	}
+}
+
 type fakeQueueClient struct {
 	called bool
 }
@@ -138,6 +216,15 @@ func (f *fakeStorage) PresignedPutURL(_ context.Context, _ string, _ time.Durati
 
 func (f *fakeStorage) ObjectExists(_ context.Context, _ string) (bool, error) {
 	return f.exists, nil
+}
+
+type fakeRateLimiter struct {
+	decision ratelimit.Decision
+	err      error
+}
+
+func (f *fakeRateLimiter) Allow(_ context.Context, _ string) (ratelimit.Decision, error) {
+	return f.decision, f.err
 }
 
 func testLogger(t *testing.T) *log.Logger {

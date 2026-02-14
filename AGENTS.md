@@ -50,21 +50,29 @@ Current implementation state:
 1. Phase 1 walking skeleton: implemented.
 2. Phase 2 local-file pipeline: implemented.
 3. Phase 3 object-storage flow: implemented.
-4. API endpoints:
+4. Phase 4 production polish: implemented.
+5. API endpoints:
    - `GET /healthz`
    - `POST /v1/jobs`
    - `POST /v1/jobs/{id}/start`
-5. Queue worker:
+   - Prometheus metrics endpoint exposed on `PIXELFLOW_API_METRICS_ADDR` (default `:9090`).
+6. Queue worker:
    - Asynq task type: `image:process`
    - Uses explicit pipeline stages (`fetch`, `transform`, `emit`) for both `source_type=local_file` and `source_type=s3_presigned`.
    - Supports `resize` and text `watermark` actions.
    - Updates job status transitions (`processing`, `succeeded`, `failed`) in Postgres.
-6. Concurrency guard:
+   - Persists usage logs (`pixels_processed`, `bytes_saved`, `compute_time_ms`) on successful processing.
+   - Exposes Prometheus metrics on `WORKER_METRICS_ADDR` (default `:9091`).
+7. Concurrency guard:
    - Semaphore-based active-job limit exists in worker.
-7. Storage/persistence:
+8. Storage/persistence:
    - MinIO/S3 client is implemented for presign/stat/get/put operations.
    - API job state is persisted in Postgres `jobs` table.
+   - API persists request user identity (`user_id`, default `anonymous`) and worker writes `usage_logs`.
    - `POST /v1/jobs` returns real presigned PUT URLs for `s3_presigned` jobs.
+9. Observability/rate control:
+   - API applies Redis-backed token bucket rate limiting for job mutation endpoints.
+   - API and worker are instrumented with OpenTelemetry tracing (configurable exporter).
 
 ## 5. Architecture Intent
 
@@ -89,17 +97,24 @@ Core runtime:
 - `cmd/api/main.go`: API process bootstrap and graceful shutdown.
 - `cmd/worker/main.go`: worker process bootstrap.
 - `internal/api/server.go`: route handlers and request/response behavior.
+- `internal/api/metrics.go`: API Prometheus metrics registry and HTTP middleware instrumentation.
+- `internal/api/rate_limit.go`: API request rate-limiting middleware behavior.
 - `internal/worker/server.go`: Asynq worker config, task handling, semaphore control.
+- `internal/worker/metrics.go`: worker Prometheus metrics registry and handler.
 - `internal/queue/tasks.go`: task type and payload contract.
 - `internal/queue/client.go`: enqueue behavior and options.
 - `internal/pipeline/processor.go`: phase 2 fetch/transform/emit orchestration.
+- `internal/pipeline/processor_benchmark_test.go`: repeatable benchmark workload definitions.
 - `internal/pipeline/object_store_stages.go`: object-storage fetch + emit stages for `s3_presigned`.
 - `internal/pipeline/transformer_std.go`: default resize + text watermark transformer.
 - `internal/pipeline/transformer_govips.go`: `govips` transformer (build tag: `govips` + `cgo`).
 - `internal/domain/job.go`: request and domain types.
+- `internal/domain/usage.go`: usage metering domain type.
+- `internal/ratelimit/token_bucket.go`: Redis token bucket implementation.
 - `internal/storage/client.go`: MinIO/S3 client wrapper for presign/stat/get/put.
-- `internal/store/postgres_job_store.go`: Postgres-backed `jobs` persistence with schema bootstrap.
+- `internal/store/postgres_job_store.go`: Postgres-backed `jobs` + `usage_logs` persistence with schema bootstrap.
 - `internal/store/memory_job_store.go`: in-memory store used in tests/fallback-only scenarios.
+- `internal/telemetry/tracing.go`: OpenTelemetry tracer provider setup.
 - `internal/webhook/client.go`: signed webhook sender with retry/backoff.
 - `internal/config/config.go`: environment-driven configuration.
 
@@ -134,6 +149,7 @@ Quality checks:
 2. `gofmt -w <files>`
 3. `go test ./...`
 4. `go test ./internal/pipeline -run TestLocalProcessor_FileInTransformFileOut`
+5. `go test ./internal/pipeline -run ^$ -bench BenchmarkProcessor -benchmem -count=3`
 
 Make shortcuts:
 
@@ -162,11 +178,13 @@ Current API:
 
 1. `POST /v1/jobs`
    - Validates `source_type` and non-empty `pipeline`.
+   - Optional identity header (`X-User-ID` by default, configurable) is persisted as `jobs.user_id` and defaults to `anonymous`.
    - `source_type=s3_presigned`:
      - Creates job with `created` status and object key `uploads/{job_id}/source`.
      - Returns real `presigned_put_url`.
    - `source_type=local_file`:
      - Requires request `object_key` as local filesystem source path.
+   - Subject to Redis-backed token bucket rate limiting (shared with `POST /v1/jobs/{id}/start`).
 2. `POST /v1/jobs/{id}/start`
    - Looks up job by ID.
    - Verifies source object exists before enqueue:
@@ -175,6 +193,7 @@ Current API:
    - Enqueues `image:process` task.
    - Marks job as `queued`.
 3. Worker lifecycle updates persisted job status to `processing`, then `succeeded` or `failed`.
+4. Worker writes `usage_logs` row on successful processing (`job_id`, `user_id`, `pixels_processed`, `bytes_saved`, `compute_time_ms`).
 
 Current task:
 
@@ -232,10 +251,12 @@ Status key: `pending`, `in_progress`, `blocked`, `done`
 5. `done` Phase 3: add upload existence checks before enqueue in `/v1/jobs/{id}/start`.
 6. `done` Phase 3: add webhook delivery with retry/backoff and signed payload.
 7. `done` Phase 3: replace in-memory job store with Postgres-backed persistence.
-8. `pending` Phase 4: add Redis token-bucket rate limiting middleware in API.
-9. `pending` Phase 4: add `usage_logs` schema and writes (`pixels_processed`, `bytes_saved`, `compute_time_ms`).
-10. `pending` Phase 4: add OpenTelemetry and Prometheus metrics for queue and processing.
-11. `pending` Phase 4: publish repeatable benchmark method/results in `README.md`.
+8. `done` Phase 4: add Redis token-bucket rate limiting middleware in API.
+9. `done` Phase 4: add `usage_logs` schema and writes (`pixels_processed`, `bytes_saved`, `compute_time_ms`).
+10. `done` Phase 4: add OpenTelemetry and Prometheus metrics for queue and processing.
+11. `done` Phase 4: publish repeatable benchmark method/results in `README.md`.
+12. `pending` Phase 5: replace header-derived `user_id` with authenticated identity propagation.
+13. `pending` Phase 5: add webhook idempotency guard to avoid duplicate callbacks on task retries.
 
 ## 14. Update Protocol For This File
 

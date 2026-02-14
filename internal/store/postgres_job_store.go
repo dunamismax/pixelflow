@@ -14,6 +14,7 @@ import (
 const jobSchemaSQL = `
 CREATE TABLE IF NOT EXISTS jobs (
 	id TEXT PRIMARY KEY,
+	user_id TEXT NOT NULL DEFAULT 'anonymous',
 	status TEXT NOT NULL,
 	source_type TEXT NOT NULL,
 	webhook_url TEXT NOT NULL DEFAULT '',
@@ -22,6 +23,23 @@ CREATE TABLE IF NOT EXISTS jobs (
 	created_at TIMESTAMPTZ NOT NULL,
 	updated_at TIMESTAMPTZ NOT NULL
 );
+
+ALTER TABLE jobs
+ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT 'anonymous';
+`
+
+const usageLogSchemaSQL = `
+CREATE TABLE IF NOT EXISTS usage_logs (
+	job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+	user_id TEXT NOT NULL,
+	pixels_processed BIGINT NOT NULL,
+	bytes_saved BIGINT NOT NULL,
+	compute_time_ms BIGINT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS usage_logs_user_id_created_at_idx
+ON usage_logs (user_id, created_at DESC);
 `
 
 type PostgresJobStore struct {
@@ -52,6 +70,9 @@ func (s *PostgresJobStore) EnsureSchema(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, jobSchemaSQL); err != nil {
 		return fmt.Errorf("ensure jobs schema: %w", err)
 	}
+	if _, err := s.db.ExecContext(ctx, usageLogSchemaSQL); err != nil {
+		return fmt.Errorf("ensure usage logs schema: %w", err)
+	}
 	return nil
 }
 
@@ -67,9 +88,10 @@ func (s *PostgresJobStore) Create(ctx context.Context, job domain.Job) error {
 
 	_, err = s.db.ExecContext(
 		ctx,
-		`INSERT INTO jobs (id, status, source_type, webhook_url, pipeline, object_key, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		`INSERT INTO jobs (id, user_id, status, source_type, webhook_url, pipeline, object_key, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		job.ID,
+		job.UserID,
 		job.Status,
 		job.SourceType,
 		job.WebhookURL,
@@ -88,7 +110,7 @@ func (s *PostgresJobStore) Create(ctx context.Context, job domain.Job) error {
 func (s *PostgresJobStore) Get(ctx context.Context, id string) (domain.Job, bool, error) {
 	row := s.db.QueryRowContext(
 		ctx,
-		`SELECT id, status, source_type, webhook_url, pipeline, object_key, created_at, updated_at
+		`SELECT id, user_id, status, source_type, webhook_url, pipeline, object_key, created_at, updated_at
 		 FROM jobs
 		 WHERE id = $1`,
 		id,
@@ -100,6 +122,7 @@ func (s *PostgresJobStore) Get(ctx context.Context, id string) (domain.Job, bool
 	)
 	if err := row.Scan(
 		&job.ID,
+		&job.UserID,
 		&job.Status,
 		&job.SourceType,
 		&job.WebhookURL,
@@ -145,4 +168,34 @@ func (s *PostgresJobStore) UpdateStatus(ctx context.Context, id, status string) 
 	}
 
 	return job, nil
+}
+
+func (s *PostgresJobStore) CreateUsageLog(ctx context.Context, usage domain.UsageLog) error {
+	createdAt := usage.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO usage_logs (job_id, user_id, pixels_processed, bytes_saved, compute_time_ms, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 ON CONFLICT (job_id) DO UPDATE
+		 SET user_id = EXCLUDED.user_id,
+		     pixels_processed = EXCLUDED.pixels_processed,
+		     bytes_saved = EXCLUDED.bytes_saved,
+		     compute_time_ms = EXCLUDED.compute_time_ms,
+		     created_at = EXCLUDED.created_at`,
+		usage.JobID,
+		usage.UserID,
+		usage.PixelsProcessed,
+		usage.BytesSaved,
+		usage.ComputeTimeMS,
+		createdAt,
+	)
+	if err != nil {
+		return fmt.Errorf("insert usage log: %w", err)
+	}
+
+	return nil
 }

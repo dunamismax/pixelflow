@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/dunamismax/pixelflow/internal/config"
 	"github.com/dunamismax/pixelflow/internal/pipeline"
 	"github.com/dunamismax/pixelflow/internal/storage"
 	"github.com/dunamismax/pixelflow/internal/store"
+	"github.com/dunamismax/pixelflow/internal/telemetry"
 	"github.com/dunamismax/pixelflow/internal/webhook"
 	"github.com/dunamismax/pixelflow/internal/worker"
 )
@@ -17,6 +20,23 @@ import (
 func main() {
 	cfg := config.Load()
 	logger := log.New(os.Stdout, "[worker] ", log.LstdFlags|log.Lmsgprefix)
+
+	traceShutdown, err := telemetry.SetupTracing(context.Background(), telemetry.TraceConfig{
+		ServiceName:  "pixelflow-worker",
+		Exporter:     cfg.Telemetry.TracesExporter,
+		OTLPEndpoint: cfg.Telemetry.OTLPTraceEndpoint,
+		OTLPInsecure: cfg.Telemetry.OTLPInsecure,
+	}, logger)
+	if err != nil {
+		logger.Fatalf("tracing init failed: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := traceShutdown(shutdownCtx); err != nil {
+			logger.Printf("tracing shutdown error: %v", err)
+		}
+	}()
 
 	logger.Printf(
 		"starting worker concurrency=%d max_active_jobs=%d queue=%s redis=%s",
@@ -69,10 +89,35 @@ func main() {
 		}
 	}()
 
-	srv, err := worker.NewServer(logger, cfg.Queue, cfg.Worker, storageClient, webhookClient, jobStore)
+	srv, err := worker.NewServer(logger, cfg.Queue, cfg.Worker, storageClient, webhookClient, jobStore, jobStore)
 	if err != nil {
 		logger.Fatalf("worker init failed: %v", err)
 	}
+
+	var metricsServer *http.Server
+	if strings.TrimSpace(cfg.Worker.MetricsAddr) != "" {
+		metricsServer = &http.Server{
+			Addr:         cfg.Worker.MetricsAddr,
+			Handler:      srv.MetricsHandler(),
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  30 * time.Second,
+		}
+		go func() {
+			logger.Printf("metrics listening on %s", cfg.Worker.MetricsAddr)
+			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Fatalf("metrics server failed: %v", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+				logger.Printf("metrics shutdown failed: %v", err)
+			}
+		}()
+	}
+
 	if err := srv.Run(); err != nil {
 		logger.Fatalf("worker failed: %v", err)
 	}

@@ -39,14 +39,20 @@
 - Add webhook callback with signed payload + retry/backoff.
 - Replace in-memory API job store with Postgres-backed persistence.
 
-## Phase 4: Production Polish
+## Phase 4 (Completed): Production Polish
 
-- Add Redis-backed rate limiting middleware in API.
-- Add `usage_logs` persistence in Postgres:
+- Added Redis-backed token bucket rate limiting middleware in API.
+- Added `usage_logs` persistence in Postgres:
   - `user_id`
   - `job_id`
   - `pixels_processed`
   - `bytes_saved`
   - `compute_time_ms`
-- Add Prometheus/OpenTelemetry metrics and tracing.
-- Publish benchmark results in `README.md`.
+- Added Prometheus metrics endpoints for API and worker.
+- Added OpenTelemetry tracing instrumentation for API requests and worker job processing.
+- Published repeatable benchmark command and baseline results in `README.md`.
+
+## Phase 5 (Planned): Reliability And Identity Hardening
+
+- Replace header-derived `user_id` with authenticated identity propagation.
+- Add webhook idempotency guard so callback retries do not emit duplicate downstream side effects.

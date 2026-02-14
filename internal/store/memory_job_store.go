@@ -12,13 +12,15 @@ import (
 var ErrJobNotFound = errors.New("job not found")
 
 type MemoryJobStore struct {
-	mu   sync.RWMutex
-	jobs map[string]domain.Job
+	mu        sync.RWMutex
+	jobs      map[string]domain.Job
+	usageLogs map[string]domain.UsageLog
 }
 
 func NewMemoryJobStore() *MemoryJobStore {
 	return &MemoryJobStore{
-		jobs: make(map[string]domain.Job),
+		jobs:      make(map[string]domain.Job),
+		usageLogs: make(map[string]domain.UsageLog),
 	}
 }
 
@@ -49,4 +51,15 @@ func (s *MemoryJobStore) UpdateStatus(_ context.Context, id, status string) (dom
 	job.UpdatedAt = time.Now().UTC()
 	s.jobs[id] = job
 	return job, nil
+}
+
+func (s *MemoryJobStore) CreateUsageLog(_ context.Context, usage domain.UsageLog) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if usage.CreatedAt.IsZero() {
+		usage.CreatedAt = time.Now().UTC()
+	}
+	s.usageLogs[usage.JobID] = usage
+	return nil
 }
