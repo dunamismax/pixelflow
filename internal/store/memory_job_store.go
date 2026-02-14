@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -21,20 +22,21 @@ func NewMemoryJobStore() *MemoryJobStore {
 	}
 }
 
-func (s *MemoryJobStore) Create(job domain.Job) {
+func (s *MemoryJobStore) Create(_ context.Context, job domain.Job) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.jobs[job.ID] = job
+	return nil
 }
 
-func (s *MemoryJobStore) Get(id string) (domain.Job, bool) {
+func (s *MemoryJobStore) Get(_ context.Context, id string) (domain.Job, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	job, ok := s.jobs[id]
-	return job, ok
+	return job, ok, nil
 }
 
-func (s *MemoryJobStore) UpdateStatus(id, status string) (domain.Job, error) {
+func (s *MemoryJobStore) UpdateStatus(_ context.Context, id, status string) (domain.Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

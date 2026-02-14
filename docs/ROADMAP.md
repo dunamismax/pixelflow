@@ -31,12 +31,13 @@
 - Replaced `build/Dockerfile.worker-vips` scaffold with multi-stage CGO/libvips build.
 - Scope boundary: object storage fetch/upload remains in Phase 3.
 
-## Phase 3: Object Storage + Presigned Flow
+## Phase 3 (Completed): Object Storage + Presigned Flow
 
 - Add MinIO/S3 client package.
 - `POST /v1/jobs` should generate real presigned PUT URL.
 - Add source-object existence checks before enqueueing.
 - Add webhook callback with signed payload + retry/backoff.
+- Replace in-memory API job store with Postgres-backed persistence.
 
 ## Phase 4: Production Polish
 

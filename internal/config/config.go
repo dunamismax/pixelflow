@@ -4,6 +4,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"time"
 
 	"github.com/hibiken/asynq"
 )
@@ -14,6 +15,7 @@ type Config struct {
 	Worker   WorkerConfig
 	Storage  StorageConfig
 	Database DatabaseConfig
+	Webhook  WebhookConfig
 }
 
 type APIConfig struct {
@@ -42,15 +44,24 @@ type WorkerConfig struct {
 }
 
 type StorageConfig struct {
-	Endpoint  string
-	AccessKey string
-	SecretKey string
-	Bucket    string
-	UseSSL    bool
+	Endpoint         string
+	AccessKey        string
+	SecretKey        string
+	Bucket           string
+	UseSSL           bool
+	PresignPutExpiry time.Duration
 }
 
 type DatabaseConfig struct {
 	DSN string
+}
+
+type WebhookConfig struct {
+	SigningSecret  string
+	Timeout        time.Duration
+	MaxAttempts    int
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
 }
 
 func Load() Config {
@@ -72,14 +83,22 @@ func Load() Config {
 			LocalOutputDir: env("WORKER_LOCAL_OUTPUT_DIR", "./.pixelflow-output"),
 		},
 		Storage: StorageConfig{
-			Endpoint:  env("MINIO_ENDPOINT", "localhost:9000"),
-			AccessKey: env("MINIO_ACCESS_KEY", "minioadmin"),
-			SecretKey: env("MINIO_SECRET_KEY", "minioadmin"),
-			Bucket:    env("MINIO_BUCKET", "pixelflow-jobs"),
-			UseSSL:    envBool("MINIO_USE_SSL", false),
+			Endpoint:         env("MINIO_ENDPOINT", "localhost:9000"),
+			AccessKey:        env("MINIO_ACCESS_KEY", "minioadmin"),
+			SecretKey:        env("MINIO_SECRET_KEY", "minioadmin"),
+			Bucket:           env("MINIO_BUCKET", "pixelflow-jobs"),
+			UseSSL:           envBool("MINIO_USE_SSL", false),
+			PresignPutExpiry: envDuration("MINIO_PRESIGN_PUT_EXPIRY", 15*time.Minute),
 		},
 		Database: DatabaseConfig{
 			DSN: env("POSTGRES_DSN", "postgres://pixelflow:pixelflow@localhost:5432/pixelflow?sslmode=disable"),
+		},
+		Webhook: WebhookConfig{
+			SigningSecret:  env("WEBHOOK_SIGNING_SECRET", "pixelflow-dev-signing-secret"),
+			Timeout:        envDuration("WEBHOOK_TIMEOUT", 10*time.Second),
+			MaxAttempts:    envInt("WEBHOOK_MAX_ATTEMPTS", 5),
+			InitialBackoff: envDuration("WEBHOOK_INITIAL_BACKOFF", 1*time.Second),
+			MaxBackoff:     envDuration("WEBHOOK_MAX_BACKOFF", 30*time.Second),
 		},
 	}
 }
@@ -110,6 +129,18 @@ func envBool(key string, fallback bool) bool {
 		return fallback
 	}
 	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := env(key, "")
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		return fallback
 	}

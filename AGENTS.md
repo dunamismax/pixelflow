@@ -49,33 +49,34 @@ Current implementation state:
 
 1. Phase 1 walking skeleton: implemented.
 2. Phase 2 local-file pipeline: implemented.
-3. API endpoints:
+3. Phase 3 object-storage flow: implemented.
+4. API endpoints:
    - `GET /healthz`
    - `POST /v1/jobs`
    - `POST /v1/jobs/{id}/start`
-4. Queue worker:
+5. Queue worker:
    - Asynq task type: `image:process`
-   - Uses explicit pipeline stages (`fetch`, `transform`, `emit`) for `source_type=local_file`.
+   - Uses explicit pipeline stages (`fetch`, `transform`, `emit`) for both `source_type=local_file` and `source_type=s3_presigned`.
    - Supports `resize` and text `watermark` actions.
-   - Defers non-local source processing to Phase 3 object storage flow.
-5. Concurrency guard:
+   - Updates job status transitions (`processing`, `succeeded`, `failed`) in Postgres.
+6. Concurrency guard:
    - Semaphore-based active-job limit exists in worker.
-6. Storage/persistence:
-   - MinIO/Postgres configs are scaffolded.
-   - API job state is still in-memory (not persisted yet).
-   - Presigned URL response is placeholder (`pending_phase_3`).
+7. Storage/persistence:
+   - MinIO/S3 client is implemented for presign/stat/get/put operations.
+   - API job state is persisted in Postgres `jobs` table.
+   - `POST /v1/jobs` returns real presigned PUT URLs for `s3_presigned` jobs.
 
 ## 5. Architecture Intent
 
 1. Control Plane (`cmd/api`):
    - Authenticate/validate/create jobs.
-   - Generate presigned upload URLs (Phase 3 target).
+   - Generate presigned upload URLs for object-storage uploads.
    - Enqueue work only after upload/start signal.
 2. Data Plane (`cmd/worker`):
    - Pull queue tasks.
    - Run image processing via pipeline package.
    - `govips` runtime is enabled when built with `-tags govips`; default dev builds use stdlib fallback.
-   - Upload outputs and send webhook callbacks (Phase 3 target).
+   - Upload outputs and send webhook callbacks (signed payload + retry/backoff).
 3. Local infra:
    - Redis for queue.
    - Postgres for durable jobs/usage.
@@ -92,10 +93,14 @@ Core runtime:
 - `internal/queue/tasks.go`: task type and payload contract.
 - `internal/queue/client.go`: enqueue behavior and options.
 - `internal/pipeline/processor.go`: phase 2 fetch/transform/emit orchestration.
+- `internal/pipeline/object_store_stages.go`: object-storage fetch + emit stages for `s3_presigned`.
 - `internal/pipeline/transformer_std.go`: default resize + text watermark transformer.
 - `internal/pipeline/transformer_govips.go`: `govips` transformer (build tag: `govips` + `cgo`).
 - `internal/domain/job.go`: request and domain types.
-- `internal/store/memory_job_store.go`: temporary in-memory job state.
+- `internal/storage/client.go`: MinIO/S3 client wrapper for presign/stat/get/put.
+- `internal/store/postgres_job_store.go`: Postgres-backed `jobs` persistence with schema bootstrap.
+- `internal/store/memory_job_store.go`: in-memory store used in tests/fallback-only scenarios.
+- `internal/webhook/client.go`: signed webhook sender with retry/backoff.
 - `internal/config/config.go`: environment-driven configuration.
 
 Infra/docs:
@@ -157,22 +162,29 @@ Current API:
 
 1. `POST /v1/jobs`
    - Validates `source_type` and non-empty `pipeline`.
-   - Creates job with `created` status and object key `uploads/{job_id}/source`.
-   - Returns placeholder `presigned_put_url` for future Phase 3.
+   - `source_type=s3_presigned`:
+     - Creates job with `created` status and object key `uploads/{job_id}/source`.
+     - Returns real `presigned_put_url`.
+   - `source_type=local_file`:
+     - Requires request `object_key` as local filesystem source path.
 2. `POST /v1/jobs/{id}/start`
    - Looks up job by ID.
+   - Verifies source object exists before enqueue:
+     - local file existence check for `local_file`.
+     - object existence check for `s3_presigned`.
    - Enqueues `image:process` task.
    - Marks job as `queued`.
+3. Worker lifecycle updates persisted job status to `processing`, then `succeeded` or `failed`.
 
 Current task:
 
 1. Type: `image:process`
 2. Payload: `job_id`, `source_type`, `webhook_url`, `object_key`, `pipeline`, `requested_at`.
 
-Current phase-2 source behavior:
+Current source behavior:
 
 1. `source_type=local_file`: `object_key` is treated as a local filesystem path by worker pipeline.
-2. Other source types keep queue contract compatibility and are deferred until Phase 3 storage integration.
+2. `source_type=s3_presigned`: worker fetches source from object storage and emits outputs to `outputs/{job_id}/...`.
 
 Do not change existing field names casually. If contract changes are needed, update API handlers, task parser, tests, and README examples together.
 
@@ -216,10 +228,10 @@ Status key: `pending`, `in_progress`, `blocked`, `done`
 1. `done` Phase 2: implement `govips` pipeline package in worker.
 2. `done` Phase 2: add local integration test for file-in -> transform -> file-out.
 3. `done` Phase 2: replace `build/Dockerfile.worker-vips` scaffold with real multi-stage libvips/libheif build.
-4. `pending` Phase 3: implement MinIO/S3 client package and real presigned PUT URL generation in `POST /v1/jobs`.
-5. `pending` Phase 3: add upload existence checks before enqueue in `/v1/jobs/{id}/start`.
-6. `pending` Phase 3: add webhook delivery with retry/backoff and signed payload.
-7. `pending` Phase 3: replace in-memory job store with Postgres-backed persistence.
+4. `done` Phase 3: implement MinIO/S3 client package and real presigned PUT URL generation in `POST /v1/jobs`.
+5. `done` Phase 3: add upload existence checks before enqueue in `/v1/jobs/{id}/start`.
+6. `done` Phase 3: add webhook delivery with retry/backoff and signed payload.
+7. `done` Phase 3: replace in-memory job store with Postgres-backed persistence.
 8. `pending` Phase 4: add Redis token-bucket rate limiting middleware in API.
 9. `pending` Phase 4: add `usage_logs` schema and writes (`pixels_processed`, `bytes_saved`, `compute_time_ms`).
 10. `pending` Phase 4: add OpenTelemetry and Prometheus metrics for queue and processing.

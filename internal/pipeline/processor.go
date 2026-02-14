@@ -11,7 +11,7 @@ import (
 	"github.com/dunamismax/pixelflow/internal/domain"
 )
 
-const SourceTypeLocalFile = "local_file"
+const SourceTypeLocalFile = domain.SourceTypeLocalFile
 
 var (
 	ErrUnsupportedSourceType = errors.New("unsupported source_type")
@@ -64,6 +64,18 @@ func NewLocalProcessor(outputDir string) (*Processor, error) {
 		fetcher:     LocalFileFetcher{},
 		transformer: transformer,
 		emitter:     LocalFileEmitter{OutputDir: outputDir},
+	}, nil
+}
+
+func NewObjectStoreProcessor(fetcher Fetcher, emitter Emitter) (*Processor, error) {
+	transformer, err := newTransformer()
+	if err != nil {
+		return nil, fmt.Errorf("build transformer: %w", err)
+	}
+	return &Processor{
+		fetcher:     fetcher,
+		transformer: transformer,
+		emitter:     emitter,
 	}, nil
 }
 

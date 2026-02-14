@@ -8,13 +8,20 @@ import (
 )
 
 const (
-	JobStatusCreated = "created"
-	JobStatusQueued  = "queued"
+	JobStatusCreated    = "created"
+	JobStatusQueued     = "queued"
+	JobStatusProcessing = "processing"
+	JobStatusSucceeded  = "succeeded"
+	JobStatusFailed     = "failed"
+
+	SourceTypeLocalFile   = "local_file"
+	SourceTypeS3Presigned = "s3_presigned"
 )
 
 type CreateJobRequest struct {
 	SourceType string         `json:"source_type"`
 	WebhookURL string         `json:"webhook_url,omitempty"`
+	ObjectKey  string         `json:"object_key,omitempty"`
 	Pipeline   []PipelineStep `json:"pipeline"`
 }
 
@@ -45,8 +52,15 @@ type Job struct {
 }
 
 func (r CreateJobRequest) Validate() error {
-	if strings.TrimSpace(r.SourceType) == "" {
+	sourceType := strings.ToLower(strings.TrimSpace(r.SourceType))
+	if sourceType == "" {
 		return errors.New("source_type is required")
+	}
+	if sourceType != SourceTypeLocalFile && sourceType != SourceTypeS3Presigned {
+		return fmt.Errorf("unsupported source_type: %s", r.SourceType)
+	}
+	if sourceType == SourceTypeLocalFile && strings.TrimSpace(r.ObjectKey) == "" {
+		return errors.New("object_key is required for source_type=local_file")
 	}
 	if len(r.Pipeline) == 0 {
 		return errors.New("pipeline must contain at least one step")
