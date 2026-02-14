@@ -1,0 +1,11 @@
+# Phase 2/3 target image:
+# 1) Build libvips + libheif with required codecs.
+# 2) Build worker with CGO enabled + govips bindings.
+# 3) Copy worker binary and runtime shared libraries into slim image.
+#
+# This file is intentionally a scaffold so the team can fill exact dependency
+# pins and build flags once the govips pipeline is implemented.
+
+FROM debian:bookworm-slim
+RUN echo "TODO: implement multi-stage libvips build for govips worker"
+
