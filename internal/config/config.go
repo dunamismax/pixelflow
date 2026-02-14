@@ -36,8 +36,9 @@ func (q QueueConfig) RedisClientOpt() asynq.RedisClientOpt {
 }
 
 type WorkerConfig struct {
-	Concurrency   int
-	MaxActiveJobs int
+	Concurrency    int
+	MaxActiveJobs  int
+	LocalOutputDir string
 }
 
 type StorageConfig struct {
@@ -66,8 +67,9 @@ func Load() Config {
 			Name:          env("ASYNC_QUEUE", "default"),
 		},
 		Worker: WorkerConfig{
-			Concurrency:   envInt("WORKER_CONCURRENCY", max(2, runtime.NumCPU())),
-			MaxActiveJobs: envInt("WORKER_MAX_ACTIVE_JOBS", defaultWorkerSlots),
+			Concurrency:    envInt("WORKER_CONCURRENCY", max(2, runtime.NumCPU())),
+			MaxActiveJobs:  envInt("WORKER_MAX_ACTIVE_JOBS", defaultWorkerSlots),
+			LocalOutputDir: env("WORKER_LOCAL_OUTPUT_DIR", "./.pixelflow-output"),
 		},
 		Storage: StorageConfig{
 			Endpoint:  env("MINIO_ENDPOINT", "localhost:9000"),

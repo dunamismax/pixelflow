@@ -48,16 +48,19 @@ Tagline: **High-Throughput, Asynchronous Image Processing Pipeline**
 Current implementation state:
 
 1. Phase 1 walking skeleton: implemented.
-2. API endpoints:
+2. Phase 2 local-file pipeline: implemented.
+3. API endpoints:
    - `GET /healthz`
    - `POST /v1/jobs`
    - `POST /v1/jobs/{id}/start`
-3. Queue worker:
+4. Queue worker:
    - Asynq task type: `image:process`
-   - Worker logs `Working...` with payload metadata.
-4. Concurrency guard:
+   - Uses explicit pipeline stages (`fetch`, `transform`, `emit`) for `source_type=local_file`.
+   - Supports `resize` and text `watermark` actions.
+   - Defers non-local source processing to Phase 3 object storage flow.
+5. Concurrency guard:
    - Semaphore-based active-job limit exists in worker.
-5. Storage/persistence:
+6. Storage/persistence:
    - MinIO/Postgres configs are scaffolded.
    - API job state is still in-memory (not persisted yet).
    - Presigned URL response is placeholder (`pending_phase_3`).
@@ -70,7 +73,8 @@ Current implementation state:
    - Enqueue work only after upload/start signal.
 2. Data Plane (`cmd/worker`):
    - Pull queue tasks.
-   - Run CPU/CGO-heavy image processing (`govips` in Phase 2).
+   - Run image processing via pipeline package.
+   - `govips` runtime is enabled when built with `-tags govips`; default dev builds use stdlib fallback.
    - Upload outputs and send webhook callbacks (Phase 3 target).
 3. Local infra:
    - Redis for queue.
@@ -87,6 +91,9 @@ Core runtime:
 - `internal/worker/server.go`: Asynq worker config, task handling, semaphore control.
 - `internal/queue/tasks.go`: task type and payload contract.
 - `internal/queue/client.go`: enqueue behavior and options.
+- `internal/pipeline/processor.go`: phase 2 fetch/transform/emit orchestration.
+- `internal/pipeline/transformer_std.go`: default resize + text watermark transformer.
+- `internal/pipeline/transformer_govips.go`: `govips` transformer (build tag: `govips` + `cgo`).
 - `internal/domain/job.go`: request and domain types.
 - `internal/store/memory_job_store.go`: temporary in-memory job state.
 - `internal/config/config.go`: environment-driven configuration.
@@ -100,7 +107,7 @@ Infra/docs:
 - `docs/ROADMAP.md`: roadmap detail by phase.
 - `build/Dockerfile.api`: API container build.
 - `build/Dockerfile.worker`: worker container build (Phase 1 friendly).
-- `build/Dockerfile.worker-vips`: placeholder for libvips/libheif runtime pipeline.
+- `build/Dockerfile.worker-vips`: multi-stage CGO/libvips worker build (with `-tags govips`).
 
 ## 7. Standard Commands (Use These First)
 
@@ -114,12 +121,14 @@ Build/run:
 
 1. `go run ./cmd/api`
 2. `go run ./cmd/worker`
+3. `docker build -f build/Dockerfile.worker-vips -t pixelflow-worker-vips .`
 
 Quality checks:
 
 1. `go mod tidy`
 2. `gofmt -w <files>`
 3. `go test ./...`
+4. `go test ./internal/pipeline -run TestLocalProcessor_FileInTransformFileOut`
 
 Make shortcuts:
 
@@ -160,6 +169,11 @@ Current task:
 1. Type: `image:process`
 2. Payload: `job_id`, `source_type`, `webhook_url`, `object_key`, `pipeline`, `requested_at`.
 
+Current phase-2 source behavior:
+
+1. `source_type=local_file`: `object_key` is treated as a local filesystem path by worker pipeline.
+2. Other source types keep queue contract compatibility and are deferred until Phase 3 storage integration.
+
 Do not change existing field names casually. If contract changes are needed, update API handlers, task parser, tests, and README examples together.
 
 ## 10. Testing Expectations
@@ -199,9 +213,9 @@ If no update is needed, explicitly state: `AGENTS.md reviewed; no changes requir
 
 Status key: `pending`, `in_progress`, `blocked`, `done`
 
-1. `pending` Phase 2: implement `govips` pipeline package in worker.
-2. `pending` Phase 2: add local integration test for file-in -> transform -> file-out.
-3. `pending` Phase 2: replace `build/Dockerfile.worker-vips` scaffold with real multi-stage libvips/libheif build.
+1. `done` Phase 2: implement `govips` pipeline package in worker.
+2. `done` Phase 2: add local integration test for file-in -> transform -> file-out.
+3. `done` Phase 2: replace `build/Dockerfile.worker-vips` scaffold with real multi-stage libvips/libheif build.
 4. `pending` Phase 3: implement MinIO/S3 client package and real presigned PUT URL generation in `POST /v1/jobs`.
 5. `pending` Phase 3: add upload existence checks before enqueue in `/v1/jobs/{id}/start`.
 6. `pending` Phase 3: add webhook delivery with retry/backoff and signed payload.

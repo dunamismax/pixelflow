@@ -4,20 +4,27 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
+	"strings"
 
 	"github.com/dunamismax/pixelflow/internal/config"
+	"github.com/dunamismax/pixelflow/internal/pipeline"
 	"github.com/dunamismax/pixelflow/internal/queue"
 	"github.com/hibiken/asynq"
 )
 
 type Server struct {
-	logger *log.Logger
-	server *asynq.Server
-	sem    chan struct{}
+	logger    *log.Logger
+	server    *asynq.Server
+	sem       chan struct{}
+	processor *pipeline.Processor
 }
 
-func NewServer(logger *log.Logger, queueCfg config.QueueConfig, workerCfg config.WorkerConfig) *Server {
+func NewServer(logger *log.Logger, queueCfg config.QueueConfig, workerCfg config.WorkerConfig) (*Server, error) {
+	processor, err := pipeline.NewLocalProcessor(workerCfg.LocalOutputDir)
+	if err != nil {
+		return nil, fmt.Errorf("initialize pipeline processor: %w", err)
+	}
+
 	s := &Server{
 		logger: logger,
 		server: asynq.NewServer(
@@ -35,9 +42,10 @@ func NewServer(logger *log.Logger, queueCfg config.QueueConfig, workerCfg config
 				}),
 			},
 		),
-		sem: make(chan struct{}, max(1, workerCfg.MaxActiveJobs)),
+		sem:       make(chan struct{}, max(1, workerCfg.MaxActiveJobs)),
+		processor: processor,
 	}
-	return s
+	return s, nil
 }
 
 func (s *Server) Run() error {
@@ -63,13 +71,23 @@ func (s *Server) handleProcessImage(ctx context.Context, task *asynq.Task) error
 		payload.ObjectKey,
 	)
 
-	// Placeholder for the real image pipeline (govips + S3 I/O in Phase 2/3).
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(600 * time.Millisecond):
+	// Phase 2 supports local file I/O. S3/MinIO source fetch and upload stay in Phase 3.
+	if strings.EqualFold(payload.SourceType, pipeline.SourceTypeLocalFile) {
+		result, err := s.processor.Process(ctx, pipeline.Request{
+			JobID:      payload.JobID,
+			SourceType: payload.SourceType,
+			ObjectKey:  payload.ObjectKey,
+			Pipeline:   payload.Pipeline,
+		})
+		if err != nil {
+			return fmt.Errorf("run local pipeline: %w", err)
+		}
+
+		s.logger.Printf("Processed job_id=%s outputs=%d", payload.JobID, len(result.Outputs))
+		return nil
 	}
 
+	s.logger.Printf("deferred processing for job_id=%s source_type=%s (pending object storage flow in phase 3)", payload.JobID, payload.SourceType)
 	return nil
 }
 

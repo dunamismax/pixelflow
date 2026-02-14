@@ -1,8 +1,12 @@
 module github.com/dunamismax/pixelflow
 
-go 1.22
+go 1.22.0
 
-require github.com/hibiken/asynq v0.25.1
+require (
+	github.com/davidbyttow/govips/v2 v2.16.0
+	github.com/hibiken/asynq v0.25.1
+	golang.org/x/image v0.24.0
+)
 
 require (
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
@@ -11,7 +15,9 @@ require (
 	github.com/redis/go-redis/v9 v9.7.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/spf13/cast v1.7.0 // indirect
+	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sys v0.27.0 // indirect
+	golang.org/x/text v0.22.0 // indirect
 	golang.org/x/time v0.8.0 // indirect
 	google.golang.org/protobuf v1.35.2 // indirect
 )

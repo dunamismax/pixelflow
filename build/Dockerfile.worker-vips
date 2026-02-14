@@ -1,11 +1,41 @@
-# Phase 2/3 target image:
-# 1) Build libvips + libheif with required codecs.
-# 2) Build worker with CGO enabled + govips bindings.
-# 3) Copy worker binary and runtime shared libraries into slim image.
-#
-# This file is intentionally a scaffold so the team can fill exact dependency
-# pins and build flags once the govips pipeline is implemented.
+FROM golang:1.22-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  build-essential \
+  ca-certificates \
+  libheif-dev \
+  libjpeg62-turbo-dev \
+  libpng-dev \
+  libvips-dev \
+  libwebp-dev \
+  pkg-config \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags govips -o /out/pixelflow-worker ./cmd/worker
 
 FROM debian:bookworm-slim
-RUN echo "TODO: implement multi-stage libvips build for govips worker"
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  ca-certificates \
+  libglib2.0-0 \
+  libheif1 \
+  libjpeg62-turbo \
+  libpng16-16 \
+  libvips42 \
+  libwebp7 \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupadd --system pixelflow \
+  && useradd --system --gid pixelflow --home /app --shell /usr/sbin/nologin pixelflow \
+  && mkdir -p /app \
+  && chown -R pixelflow:pixelflow /app
+
+WORKDIR /app
+COPY --from=builder /out/pixelflow-worker /pixelflow-worker
+
+USER pixelflow
+ENTRYPOINT ["/pixelflow-worker"]

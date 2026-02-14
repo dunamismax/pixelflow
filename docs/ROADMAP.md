@@ -17,17 +17,19 @@
 - Worker consumes Asynq tasks and logs processing execution.
 - Core tests for request and queue payload contracts.
 
-## Phase 2: Image Pipeline (`govips`)
+## Phase 2 (Completed): Image Pipeline (`govips` + local file mode)
 
-- Add worker pipeline package with explicit stages:
+- Worker pipeline package added with explicit stages:
   - input fetch
   - transform execution
-  - output encode/upload
-- Initialize and shut down `govips` safely in worker process lifecycle.
-- Implement action handlers:
+  - output encode/write
+- Worker lifecycle now initializes and shuts down `govips` when built with `-tags govips`.
+- Implemented action handlers:
   - resize
   - watermark (text)
-- Add integration test for local file input/output.
+- Added local integration test for file-in -> transform -> file-out.
+- Replaced `build/Dockerfile.worker-vips` scaffold with multi-stage CGO/libvips build.
+- Scope boundary: object storage fetch/upload remains in Phase 3.
 
 ## Phase 3: Object Storage + Presigned Flow
 
@@ -47,4 +49,3 @@
   - `compute_time_ms`
 - Add Prometheus/OpenTelemetry metrics and tracing.
 - Publish benchmark results in `README.md`.
-

@@ -5,7 +5,7 @@ High-Throughput, Asynchronous Image Processing Pipeline
 ## Phase Status
 
 - `Phase 1`: complete (walking skeleton)
-- `Phase 2`: scaffolded (pipeline interfaces and worker throttle in place)
+- `Phase 2`: implemented for local file processing (`resize`, `watermark`) with optional `govips` runtime
 - `Phase 3`: scaffolded (MinIO/S3 config + presigned URL integration path)
 - `Phase 4`: partially scaffolded (concurrency limiter implemented)
 
@@ -26,6 +26,7 @@ internal/
   config/    # environment-driven config
   domain/    # request/job models
   id/        # lightweight ID generation
+  pipeline/  # fetch/transform/emit image pipeline stages
   queue/     # asynq task contracts + enqueue client
   store/     # in-memory job store (Phase 1 placeholder for Postgres)
   worker/    # asynq worker server and handlers
@@ -34,7 +35,7 @@ pkg/
 build/
   Dockerfile.api          # multi-stage API image
   Dockerfile.worker       # multi-stage worker image (Phase 1 compatible)
-  Dockerfile.worker-vips  # scaffold for libvips/libheif runtime image
+  Dockerfile.worker-vips  # multi-stage CGO/libvips worker build (`-tags govips`)
 ```
 
 ## Local Stack (Docker Compose)
@@ -60,11 +61,15 @@ go run ./cmd/api
 go run ./cmd/worker
 ```
 
-## Phase 1 API Flow
+Worker writes Phase 2 local pipeline outputs to `WORKER_LOCAL_OUTPUT_DIR` (default `./.pixelflow-output`).
+
+## API Flow (Current)
 
 1. Create a job with pipeline instructions.
-2. Start the job (this enqueues dummy processing payload to Redis/Asynq).
-3. Worker receives the task and logs `Working...`.
+2. Start the job (this enqueues processing payload to Redis/Asynq).
+3. Worker behavior:
+   - `source_type=local_file`: runs Phase 2 transforms and writes local outputs.
+   - non-local source types: enqueue contract works, heavy processing is deferred to Phase 3 object-storage flow.
 
 ### 1) Create Job
 
@@ -104,9 +109,22 @@ curl http://localhost:8080/healthz
 
 See `.env.example` for all supported environment variables.
 
+## Phase 2 Local Pipeline Check
+
+Run the local file integration test:
+
+```bash
+go test ./internal/pipeline -run TestLocalProcessor_FileInTransformFileOut
+```
+
+Build the `govips` worker container:
+
+```bash
+docker build -f build/Dockerfile.worker-vips -t pixelflow-worker-vips .
+```
+
 ## Next Phases
 
-- Phase 2: wire `govips` pipeline in worker handler.
 - Phase 3: generate real MinIO/S3 presigned URLs in `POST /v1/jobs`.
 - Phase 4: add metrics, usage metering, and Redis-backed rate limiting middleware.
 
