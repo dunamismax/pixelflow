@@ -1,185 +1,215 @@
 # PixelFlow
 
-High-Throughput, Asynchronous Image Processing Pipeline
+PixelFlow is a high-throughput, asynchronous image processing pipeline for teams that need durable job orchestration, object-storage workflows, and production-grade observability.
 
-## Phase Status
+## Hero
 
-- `Phase 1`: complete (walking skeleton)
-- `Phase 2`: implemented for local file processing (`resize`, `watermark`) with optional `govips` runtime
-- `Phase 3`: complete (MinIO/S3 presigned upload flow, upload checks, webhook delivery, Postgres job store)
-- `Phase 4`: complete (Redis rate limiting, usage metering, Prometheus metrics, OpenTelemetry tracing, benchmarks)
+PixelFlow separates control-plane API operations from data-plane image processing so you can queue, process, and track image jobs without pushing heavy image work through your HTTP layer.
 
-## Architecture
+- Control plane API for job creation and enqueueing
+- Asynq-based worker for resize and watermark transforms
+- Local file and MinIO/S3 presigned source flows
+- Postgres-backed job state and usage metering
+- Prometheus metrics and OpenTelemetry tracing
 
-- Control Plane (API): validates requests, persists jobs in Postgres, generates presigned upload URLs, and enqueues processing.
-- Data Plane (Worker): consumes queued jobs, processes images from local file or object storage, emits outputs, and sends signed webhook callbacks.
-- Infra: Redis (queue), Postgres (durable jobs), MinIO (object storage).
-- Production controls: Redis token-bucket rate limiting in API (`POST /v1/jobs`, `POST /v1/jobs/{id}/start`).
-- Observability: Prometheus metrics endpoints in both API and worker processes; OpenTelemetry tracing for API requests and worker job processing.
+## Trust Signals
 
-## Repo Layout
+![Go Version](https://img.shields.io/badge/go-1.24%2B-00ADD8?logo=go&logoColor=white)
+![Docker Compose](https://img.shields.io/badge/docker-compose_v2-2496ED?logo=docker&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
 
-```text
-cmd/
-  api/       # HTTP control-plane service
-  worker/    # asynchronous data-plane worker
-internal/
-  api/       # HTTP handlers and route wiring
-  config/    # environment-driven config
-  domain/    # request/job models
-  id/        # lightweight ID generation
-  pipeline/  # fetch/transform/emit image pipeline stages
-  queue/     # asynq task contracts + enqueue client
-  storage/   # MinIO/S3 client wrapper (presign/stat/get/put)
-  store/     # job persistence implementations (memory + Postgres)
-  webhook/   # webhook sender with signed payload + retry/backoff
-  worker/    # asynq worker server and handlers
-pkg/
-  version/   # shared version metadata
-build/
-  Dockerfile.api          # multi-stage API image
-  Dockerfile.worker       # multi-stage worker image (Phase 1 compatible)
-  Dockerfile.worker-vips  # multi-stage CGO/libvips worker build (`-tags govips`)
+- Release status: core pipeline phases are complete, with Phase 5 hardening tracked in `docs/ROADMAP.md`.
+- Last command validation in this repo: `2026-02-14`.
+
+## Quick Start
+
+### Prerequisites
+
+- Go `1.24+`
+- Docker Engine with Docker Compose v2
+- `curl` for API verification
+- Git
+
+### Run
+
+1. Clone and enter the repository:
+
+```bash
+git clone https://github.com/dunamismax/pixelflow.git
+cd pixelflow
 ```
 
-## Local Stack (Docker Compose)
-
-Starts:
-
-- Redis: `localhost:6379`
-- Postgres: `localhost:5432` (`pixelflow/pixelflow`)
-- MinIO API: `localhost:9000`
-- MinIO Console: `localhost:9001`
+1. Start local infrastructure:
 
 ```bash
 docker compose up -d
 ```
 
-## Run Services
+1. Start the API (terminal 1):
 
 ```bash
 go run ./cmd/api
 ```
 
+1. Start the worker (terminal 2):
+
 ```bash
 go run ./cmd/worker
 ```
 
-Worker writes Phase 2 local pipeline outputs to `WORKER_LOCAL_OUTPUT_DIR` (default `./.pixelflow-output`).
-
-Metrics endpoints:
-
-- API metrics: `http://localhost:9090/metrics` (`PIXELFLOW_API_METRICS_ADDR`)
-- Worker metrics: `http://localhost:9091/metrics` (`WORKER_METRICS_ADDR`)
-
-## API Flow (Current)
-
-1. Create a job with pipeline instructions.
-2. For `source_type=s3_presigned`, upload source bytes to the returned presigned URL.
-3. Start the job (API validates the source object exists before enqueueing).
-4. Worker behavior:
-   - `source_type=local_file`: fetches local source path and writes local outputs.
-   - `source_type=s3_presigned`: fetches input from MinIO/S3 and writes outputs to `outputs/{job_id}/...`.
-5. Job status transitions are persisted in Postgres (`created` -> `queued` -> `processing` -> `succeeded|failed`).
-6. Worker sends signed webhook callbacks (`job.completed` / `job.failed`) with retry/backoff.
-7. API rate limiting is applied per user header (`X-User-ID` by default) and route using a Redis token bucket.
-8. Worker writes `usage_logs` in Postgres for successful jobs (`pixels_processed`, `bytes_saved`, `compute_time_ms`).
-
-### 1) Create Job
-
-```bash
-curl -X POST http://localhost:8080/v1/jobs \
-  -H "Content-Type: application/json" \
-  -H "X-User-ID: demo-user" \
-  -d '{
-    "source_type": "s3_presigned",
-    "webhook_url": "https://client-site.com/hooks/pixel-done",
-    "pipeline": [
-      {
-        "id": "thumb_small",
-        "action": "resize",
-        "width": 150,
-        "format": "webp",
-        "quality": 80
-      }
-    ]
-  }'
-```
-
-### 2) Upload Source (For `s3_presigned`)
-
-Use the returned `upload.presigned_put_url`:
-
-```bash
-curl -X PUT "<presigned_put_url>" \
-  -H "Content-Type: image/png" \
-  --data-binary "@./source.png"
-```
-
-### 3) Start Job
-
-Use the returned `job_id`:
-
-```bash
-curl -X POST http://localhost:8080/v1/jobs/<job_id>/start
-```
-
-### 4) Health Check
+1. Verify API health:
 
 ```bash
 curl http://localhost:8080/healthz
 ```
 
-## Configuration
+Expected result:
 
-See `.env.example` for all supported environment variables.
+- Health response: `{"status":"ok"}`
+- API metrics: `http://localhost:9090/metrics`
+- Worker metrics: `http://localhost:9091/metrics`
 
-Key Phase 4 env vars:
+## Features
 
-- `PIXELFLOW_API_RATE_LIMIT_ENABLED` (default `true`)
-- `PIXELFLOW_API_RATE_LIMIT_CAPACITY` (default `60`)
-- `PIXELFLOW_API_RATE_LIMIT_WINDOW` (default `1m`)
-- `PIXELFLOW_API_RATE_LIMIT_USER_ID_HEADER` (default `X-User-ID`)
-- `PIXELFLOW_API_METRICS_ADDR` (default `:9090`)
-- `WORKER_METRICS_ADDR` (default `:9091`)
-- `OTEL_TRACES_EXPORTER` (`none`, `stdout`, or `otlp`; default `none`)
-- `OTEL_EXPORTER_OTLP_ENDPOINT` (required when `OTEL_TRACES_EXPORTER=otlp`)
-- `OTEL_EXPORTER_OTLP_INSECURE` (default `true`)
+- `Job API`: create and start jobs via `POST /v1/jobs` and `POST /v1/jobs/{id}/start`.
+- `Dual source modes`: process `local_file` sources or `s3_presigned` object-storage uploads.
+- `Pipeline actions`: resize and text watermark transforms with explicit step definitions.
+- `Durable state`: persisted job lifecycle in Postgres (`created`, `queued`, `processing`, `succeeded`, `failed`).
+- `Usage metering`: worker writes `usage_logs` with pixels processed, bytes saved, and compute time.
+- `Rate limiting`: Redis token bucket on mutating job endpoints.
+- `Webhooks`: signed callback delivery with retry and exponential backoff.
+- `Observability`: Prometheus metrics and OpenTelemetry traces in both API and worker.
 
-## Phase 2 Local Pipeline Check
+## Tech Stack
 
-Run the local file integration test:
+| Layer | Technology | Purpose |
+| --- | --- | --- |
+| Language/runtime | [Go 1.24+](https://go.dev/) | API and worker services |
+| Queue | [Asynq](https://github.com/hibiken/asynq) + [Redis](https://redis.io/) | Background task dispatch and processing |
+| Database | [PostgreSQL](https://www.postgresql.org/) | Durable job and usage persistence |
+| Object storage | [MinIO](https://min.io/) / S3-compatible APIs | Presigned upload flow and object IO |
+| Image processing | Go stdlib + optional [`govips`](https://github.com/davidbyttow/govips) | Resize and watermark transforms |
+| Metrics | [Prometheus client_golang](https://github.com/prometheus/client_golang) | API/worker metrics endpoints |
+| Tracing | [OpenTelemetry](https://opentelemetry.io/) | Distributed tracing instrumentation |
+| Containerization | Docker + Docker Compose | Local infra and deployable images |
 
-```bash
-go test ./internal/pipeline -run TestLocalProcessor_FileInTransformFileOut
+## Project Structure
+
+```text
+pixelflow/
+├── cmd/
+│   ├── api/                     # API process bootstrap
+│   └── worker/                  # Worker process bootstrap
+├── internal/
+│   ├── api/                     # HTTP handlers, tracing, metrics, rate limiting
+│   ├── config/                  # Environment-driven config loader
+│   ├── domain/                  # Job and usage domain models
+│   ├── pipeline/                # Fetch/transform/emit image pipeline
+│   ├── queue/                   # Asynq task contracts and enqueue client
+│   ├── ratelimit/               # Redis token bucket implementation
+│   ├── storage/                 # MinIO/S3 client wrapper
+│   ├── store/                   # Postgres and memory stores
+│   ├── telemetry/               # OpenTelemetry setup
+│   ├── webhook/                 # Signed webhook client with retries
+│   └── worker/                  # Worker server and task handlers
+├── build/
+│   ├── Dockerfile.api           # API container image
+│   ├── Dockerfile.worker        # Worker container image (stdlib path)
+│   └── Dockerfile.worker-vips   # Worker container image with govips/libvips
+├── docs/
+│   └── ROADMAP.md               # Phase roadmap and planned hardening work
+├── docker-compose.yml           # Redis + Postgres + MinIO local stack
+├── .env.example                 # Environment variable reference
+└── Makefile                     # Common local developer targets
 ```
 
-Build the `govips` worker container:
+## Development Workflow and Common Commands
+
+### Setup
 
 ```bash
-docker build -f build/Dockerfile.worker-vips -t pixelflow-worker-vips .
+docker compose up -d
 ```
 
-## Benchmark Method And Results
-
-Repeatable benchmark command:
+### Run
 
 ```bash
-go test ./internal/pipeline -run ^$ -bench BenchmarkProcessor -benchmem -count=3
+go run ./cmd/api
+go run ./cmd/worker
 ```
 
-Benchmark environment (`2026-02-14`):
+### Test
 
-- `goos=windows`
-- `goarch=amd64`
-- `cpu=Intel(R) Core(TM) Ultra 9 275HX`
-- Build tags: default stdlib transformer path (no `govips`)
+```bash
+go test ./...
+go test ./internal/pipeline -run TestLocalProcessor_FileInTransformFileOut -count=1
+go test ./internal/pipeline -run ^$ -bench BenchmarkProcessor -benchmem -count=1
+```
 
-Latest results:
+### Build
 
-| Benchmark | Mean ns/op | Mean ms/op | Mean allocs/op | Mean bytes/op |
-| --- | ---: | ---: | ---: | ---: |
-| `BenchmarkProcessorResize` | `12,541,844` | `12.54` | `230,435` | `10,244,979` |
-| `BenchmarkProcessorWatermark` | `26,361,288` | `26.36` | `58` | `17,557,174` |
+```bash
+docker build -f build/Dockerfile.api -t pixelflow-api-test .
+docker build -f build/Dockerfile.worker -t pixelflow-worker-test .
+docker build -f build/Dockerfile.worker-vips -t pixelflow-worker-vips-test .
+```
 
-Detailed roadmap: `docs/ROADMAP.md`.
+### Cleanup
+
+```bash
+docker compose down
+```
+
+## Deployment and Operations
+
+### Deployment method
+
+- Build deployable containers from `build/Dockerfile.api`, `build/Dockerfile.worker`, or `build/Dockerfile.worker-vips`.
+- Run API and worker as separate services; connect both to shared Redis, Postgres, and S3-compatible storage.
+
+### Environment and secrets
+
+- Use `.env.example` as the full environment contract.
+- Do not commit real credentials; provide runtime secrets via environment variables or secret managers.
+
+### Health, logs, and monitoring entry points
+
+- API health check: `GET /healthz`
+- API metrics: `PIXELFLOW_API_METRICS_ADDR` (default `:9090`)
+- Worker metrics: `WORKER_METRICS_ADDR` (default `:9091`)
+- Infra logs: `docker compose logs --no-color --tail=50 redis postgres minio minio-init`
+
+### Rollback notes
+
+- Roll back by redeploying previously published API/worker images.
+- Job/usage schemas are managed idempotently on startup by the Postgres store bootstrap.
+
+## Security and Reliability Notes
+
+- `Input validation`: API uses strict JSON decoding and rejects unknown fields.
+- `Rate control`: Redis token bucket protects job mutation endpoints.
+- `Webhook integrity`: callbacks are HMAC-SHA256 signed (`X-Pixelflow-Signature`) with timestamp and event headers.
+- `Source verification`: `/v1/jobs/{id}/start` checks source existence before enqueueing.
+- `Worker stability`: semaphore limits active heavy jobs (`WORKER_MAX_ACTIVE_JOBS`).
+- `Durability`: job state and usage logs persist in Postgres.
+- `Current identity model`: user identity is header-derived (`X-User-ID` by default); stronger authenticated propagation is tracked in Phase 5.
+
+## Documentation
+
+| Path | Purpose |
+| --- | --- |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phase roadmap and pending hardening work |
+| [`.env.example`](.env.example) | Supported environment variables and defaults |
+| [`AGENTS.md`](AGENTS.md) | Repo-operating and maintenance contract |
+
+## Contributing
+
+Contributions are welcome through pull requests and issues.
+
+- Open an issue for bugs, regressions, or feature proposals.
+- Keep changes scoped and include tests for behavior changes.
+- Run `go test ./...` before opening a PR.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
